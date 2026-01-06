@@ -26,7 +26,7 @@ def main(page: ft.Page):
     # アプリ全体の設定
     page.title = "Flet 天気アプリ"
     page.padding = 0
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.bgcolor = "white"
 
     # ============================
     # 関数群
@@ -48,22 +48,13 @@ def main(page: ft.Page):
     def get_weather(area_name):
         return WEATHER_MOCK.get(area_name, "sunny")
 
-    def get_bg_gradient(weather):
+    def get_bg_color(weather):
         if weather == "rainy":
-            return ft.LinearGradient(
-                begin=ft.Alignment(0, -1), end=ft.Alignment(0, 1),
-                colors=["#37474F", "#546E7A"],
-            )
+            return "#E1F5FE"
         elif weather == "sunny":
-            return ft.LinearGradient(
-                begin=ft.Alignment(-1, -1), end=ft.Alignment(1, 1),
-                colors=["#29B6F6", "#B3E5FC"],
-            )
+            return "#FFF9C4"
         else:
-            return ft.LinearGradient(
-                begin=ft.Alignment(0, -1), end=ft.Alignment(0, 1),
-                colors=["#9E9E9E", "#EEEEEE"],
-            )
+            return "#F5F5F5"
 
     # ============================
     # UI構築
@@ -71,102 +62,89 @@ def main(page: ft.Page):
     
     background_container = ft.Container(
         expand=True,
-        gradient=get_bg_gradient("sunny"),
+        bgcolor="white",
     )
 
     status_text = ft.Text(
         value="読込中...", 
-        size=20, 
+        size=24, 
         weight="bold", 
-        color="white"
+        color="black"
     )
 
-    # 最新バージョンなので ft.Wrap が使えます（これが一番きれいに並びます）
-    areas_wrap = ft.Wrap(
-        spacing=10,
-        run_spacing=10,
-    )
-    
-    # スクロール用コンテナ
-    scroll_container = ft.Column(
-        controls=[areas_wrap],
-        scroll=ft.ScrollMode.AUTO,
-        expand=True,
+    # シンプルなColumnでカードを縦に並べる
+    areas_column = ft.Column(
+        spacing=15,
+        scroll="auto",
     )
 
     def update_ui():
         my_region = load_my_region()
         
-        # 背景とステータス更新
+        # 背景色とステータス更新
         if my_region:
             w = get_weather(my_region)
-            background_container.gradient = get_bg_gradient(w)
+            background_container.bgcolor = get_bg_color(w)
             icon_char = "☀️" if w == "sunny" else "☔" if w == "rainy" else "☁️"
             status_text.value = f"My地域: {my_region}  {icon_char}"
         else:
-            background_container.gradient = get_bg_gradient("default")
+            background_container.bgcolor = "#F5F5F5"
             status_text.value = "My地域は未設定です"
 
-        # グリッドの再描画
-        current_region_name = region_names[rail.selected_index]
+        # ナビゲーションのインデックス取得
+        idx = rail.selected_index if rail.selected_index is not None else 0
+        current_region_name = region_names[idx]
         areas = REGION_DATA[current_region_name]
         
-        areas_wrap.controls.clear()
+        areas_column.controls.clear()
         
         for area in areas:
             w = get_weather(area)
             is_my = (area == my_region)
             
-            # アイコンとテキスト
-            btn_icon_name = "check" if is_my else "add"
-            btn_label = "設定済" if is_my else "My地域"
-            btn_bg_color = "grey" if is_my else "blue"
-
-            # ボタンの中身
-            button_content = ft.Row(
-                controls=[
-                    ft.Icon(btn_icon_name, color="white"),
-                    ft.Text(btn_label, color="white")
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-            )
+            btn_label = "設定済" if is_my else "My地域に設定"
+            btn_icon = "check" if is_my else "add"
+            btn_bg_color = "#9E9E9E" if is_my else "#1976D2"
 
             # カードの中身
-            card_col = ft.Column(
-                controls=[
-                    ft.Text(area, size=18, weight="bold", color="black"),
-                    ft.Text(f"天気: {w}", color="#555555"),
-                    ft.Container(height=5),
-                    
-                    ft.ElevatedButton(
-                        content=button_content,
-                        disabled=is_my,
-                        on_click=on_register_click,
-                        data=area,
-                        bgcolor=btn_bg_color,
-                        color="white"
-                    )
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER
-            )
-
             card = ft.Container(
-                width=160,  # カードの幅を固定
-                height=130, # 高さも少し確保
-                content=card_col,
+                content=ft.Row(
+                    controls=[
+                        ft.Column(
+                            controls=[
+                                ft.Text(area, size=20, weight="bold", color="black"),
+                                ft.Text(f"天気: {w}", size=14, color="#757575"),
+                            ],
+                            spacing=5,
+                        ),
+                        ft.ElevatedButton(
+                            content=ft.Row(
+                                controls=[
+                                    ft.Icon(btn_icon, color="white", size=18),
+                                    ft.Text(btn_label, color="white", size=14)
+                                ],
+                                spacing=5,
+                            ),
+                            disabled=is_my,
+                            on_click=lambda e, a=area: on_register_click(a),
+                            bgcolor=btn_bg_color,
+                        )
+                    ],
+                    alignment="spaceBetween",
+                ),
                 bgcolor="white",
                 border_radius=10,
-                padding=10,
+                padding=20,
+                border=ft.border.all(1, "#E0E0E0"),
             )
-            areas_wrap.controls.append(card)
+            areas_column.controls.append(card)
         
         page.update()
 
-    def on_register_click(e):
-        area_name = e.control.data
+    def on_register_click(area_name):
         save_my_region_to_file(area_name)
-        page.open(ft.SnackBar(ft.Text(f"{area_name} を登録しました！")))
+        page.snack_bar = ft.SnackBar(ft.Text(f"{area_name} を登録しました！"))
+        page.snack_bar.open = True
         update_ui()
 
     def on_nav_change(e):
@@ -176,7 +154,7 @@ def main(page: ft.Page):
     rail = ft.NavigationRail(
         selected_index=0,
         label_type="all",
-        min_width=100,
+        min_width=120,
         destinations=[
             ft.NavigationRailDestination(
                 icon="map_outlined", 
@@ -185,17 +163,24 @@ def main(page: ft.Page):
             ) for name in region_names
         ],
         on_change=on_nav_change,
-        bgcolor="#DDFFFFFF", 
+        bgcolor="#F5F5F5",
     )
 
     layout_row = ft.Row(
         controls=[
             rail,
-            ft.VerticalDivider(width=1, color="transparent"),
-            ft.Column([
-                ft.Container(padding=20, content=status_text),
-                ft.Container(content=scroll_container, padding=20, expand=True)
-            ], expand=True)
+            ft.VerticalDivider(width=1, color="#E0E0E0"),
+            ft.Column(
+                controls=[
+                    ft.Container(padding=20, content=status_text),
+                    ft.Container(
+                        content=areas_column,
+                        padding=20,
+                        expand=True,
+                    )
+                ],
+                expand=True,
+            )
         ],
         expand=True,
         spacing=0
@@ -203,7 +188,6 @@ def main(page: ft.Page):
 
     background_container.content = layout_row
     page.add(background_container)
-
     update_ui()
 
 ft.app(target=main)
