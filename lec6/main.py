@@ -2,16 +2,43 @@ import flet as ft
 import json
 import httpx
 import os
-
 import sqlite3
 
+# ============================
+# データベース設定・操作関数
+# ============================
 DB_NAME = "weather.db"
 
+def init_db():
+    """テーブルが存在しない場合に作成する初期化関数"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # 1. 地域マスタ
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS areas (
+            area_code TEXT PRIMARY KEY,
+            area_name TEXT NOT NULL
+        )
+    """)
+    
+    # 2. 天気予報データ
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            area_code TEXT NOT NULL,
+            forecast_date TEXT NOT NULL,
+            weather TEXT,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(area_code, forecast_date),
+            FOREIGN KEY (area_code) REFERENCES areas(area_code)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
 def save_areas_to_db(area_data):
-    """
-    area.json の内容を DB に保存する
-    centers（地方）と offices（府県）の両方を保存します
-    """
+    """area.json の内容を DB に保存する"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
@@ -32,23 +59,18 @@ def save_areas_to_db(area_data):
     print("エリア情報をDBに保存しました")
 
 def save_forecasts_to_db(area_code, json_data):
-    """
-    取得した天気予報JSONを分解して DB に保存する
-    """
+    """取得した天気予報JSONを分解して DB に保存する"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # JSON構造の解析（jmaのjsonは少し深いので注意）
     time_defines = json_data.get("timeDefines", [])
     
-    # 予報データ本体がある場所を探す
     areas = json_data.get("areas", [])
     if not areas:
         return
 
     weathers = areas[0].get("weathers", [])
 
-    # 日付と天気をセットにして保存
     for date_str, weather_str in zip(time_defines, weathers):
         # 日付を "2023-01-01" の形式にする
         simple_date = date_str.split("T")[0]
@@ -62,15 +84,32 @@ def save_forecasts_to_db(area_code, json_data):
     conn.close()
     print(f"{area_code} の予報をDBに保存しました")
 
+def get_forecasts_from_db(area_code):
+    """DBから指定したエリアの天気予報を取得する"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # 日付順に取得
+    cursor.execute("""
+        SELECT forecast_date, weather 
+        FROM forecasts 
+        WHERE area_code = ? 
+        ORDER BY forecast_date
+    """, (area_code,))
+    
+    rows = cursor.fetchall() # List of (date, weather)
+    conn.close()
+    return rows
+
 # ============================
-# データ定義
+# 定数定義
 # ============================
 AREA_JSON_URL = "https://www.jma.go.jp/bosai/common/const/area.json"
 FORECAST_URL_BASE = "https://www.jma.go.jp/bosai/forecast/data/forecast/"
 SETTINGS_FILE = "my_region_data.json"
 
 # ============================
-# データ取得関数
+# APIデータ取得関数
 # ============================
 def fetch_area_data():
     """気象庁から地域リストを取得"""
@@ -88,14 +127,19 @@ def fetch_weather_data(area_code):
         url = f"{FORECAST_URL_BASE}{area_code}.json"
         response = httpx.get(url, timeout=10.0, follow_redirects=True)
         response.raise_for_status()
-        return response.json()
+        # jmaの予報jsonはリスト形式で返るため、最初の要素[0]["timeSeries"][0]を返すように調整
+        data = response.json()
+        return data[0]["timeSeries"][0]
     except Exception as e:
         print(f"天気データ取得エラー: {e}")
         return None
 
+# ============================
+# Main アプリケーション
+# ============================
 def main(page: ft.Page):
     # アプリ全体の設定
-    page.title = "気象庁 天気予報アプリ"
+    page.title = "気象庁 天気予報アプリ (DB版)"
     page.padding = 0
     page.bgcolor = "white"
 
@@ -103,9 +147,12 @@ def main(page: ft.Page):
     area_data = None
     selected_center = None
     
-    # ============================
-    # 関数群
-    # ============================
+    # DB初期化（テーブル作成）
+    init_db()
+
+    # ---------------------------
+    # 設定ファイル関連関数
+    # ---------------------------
     def load_my_region():
         if os.path.exists(SETTINGS_FILE):
             try:
@@ -120,10 +167,9 @@ def main(page: ft.Page):
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump({"my_region": {"code": area_code, "name": area_name}}, f, ensure_ascii=False)
 
-    # ============================
-    # UI構築
-    # ============================
-    
+    # ---------------------------
+    # UIコンポーネント
+    # ---------------------------
     status_text = ft.Text(
         value="読込中...", 
         size=24, 
@@ -146,31 +192,34 @@ def main(page: ft.Page):
         visible=False
     )
 
+    # ---------------------------
+    # ロジック関数
+    # ---------------------------
     def show_weather_forecast(area_code, area_name):
-        """天気予報を表示"""
+        """天気予報を表示 (API -> DB -> 画面 の流れ)"""
         weather_display.controls.clear()
         weather_display.visible = True
         
         # ローディング表示
         weather_display.controls.append(
-            ft.Text(f"{area_name}の天気予報を取得中...", size=18, color="#666666")
+            ft.Text(f"{area_name}のデータを更新・取得中...", size=18, color="#666666")
         )
         page.update()
         
-        # 天気データ取得
-        weather_data = fetch_weather_data(area_code)
-        
-        if not weather_data:
-            weather_display.controls.clear()
-            weather_display.controls.append(
-                ft.Text("天気予報の取得に失敗しました", size=18, color="red")
-            )
-            page.update()
-            return
-        
+        # 1. APIから最新データを取得してDBに保存 (通信エラー時はスキップしてDB内の過去データを表示)
+        try:
+            raw_data = fetch_weather_data(area_code)
+            if raw_data:
+                save_forecasts_to_db(area_code, raw_data)
+        except Exception as e:
+            print(f"通信エラー (DBのデータを表示します): {e}")
+
+        # 2. 画面表示は「DBのデータ」を使って行う
+        db_rows = get_forecasts_from_db(area_code)
+
         weather_display.controls.clear()
         
-        # タイトル
+        # ヘッダー作成
         weather_display.controls.append(
             ft.Container(
                 content=ft.Row([
@@ -184,54 +233,39 @@ def main(page: ft.Page):
                 padding=10
             )
         )
-        
-        try:
-            # 天気予報データを解析
-            for forecast in weather_data:
-                publishing_office = forecast.get("publishingOffice", "")
-                report_datetime = forecast.get("reportDatetime", "")
-                
-                weather_display.controls.append(
-                    ft.Text(f"発表: {publishing_office} ({report_datetime})", size=14, color="#666666")
-                )
-                
-                time_series = forecast.get("timeSeries", [])
-                
-                for series in time_series:
-                    time_defines = series.get("timeDefines", [])
-                    areas_data = series.get("areas", [])
-                    
-                    for area in areas_data:
-                        area_name_in_data = area.get("area", {}).get("name", "")
-                        
-                        # 天気情報
-                        weathers = area.get("weathers", [])
-                        winds = area.get("winds", [])
-                        waves = area.get("waves", [])
-                        
-                        for i, time_define in enumerate(time_defines):
-                            if i < len(weathers):
-                                card = ft.Container(
-                                    content=ft.Column([
-                                        ft.Text(f"日時: {time_define}", size=16, weight="bold", color="#333333"),
-                                        ft.Text(f"地域: {area_name_in_data}", size=14, color="#666666"),
-                                        ft.Text(f"天気: {weathers[i]}", size=14, color="#333333"),
-                                        ft.Text(f"風: {winds[i] if i < len(winds) else '情報なし'}", size=14, color="#666666") if winds else ft.Container(),
-                                        ft.Text(f"波: {waves[i] if i < len(waves) else '情報なし'}", size=14, color="#666666") if waves else ft.Container(),
-                                    ], spacing=5),
-                                    bgcolor="white",
-                                    padding=15,
-                                    border_radius=8,
-                                    border=ft.Border.all(1, "#E0E0E0")
-                                )
-                                weather_display.controls.append(card)
-                
-                weather_display.controls.append(ft.Divider())
-        
-        except Exception as e:
+
+        if not db_rows:
             weather_display.controls.append(
-                ft.Text(f"データ解析エラー: {str(e)}", size=14, color="red")
+                ft.Text("表示できるデータがありません（通信を確認してください）", size=18, color="red")
             )
+            page.update()
+            return
+
+        # DBデータをループしてカードを作成
+        for date_display, weather_str in db_rows:
+            # アイコン判定
+            icon_name = "help_outline"
+            if "晴" in weather_str: icon_name = "wb_sunny"
+            elif "曇" in weather_str: icon_name = "cloud"
+            elif "雨" in weather_str: icon_name = "umbrella"
+            elif "雪" in weather_str: icon_name = "ac_unit"
+            
+            icon_color = "orange" if "晴" in weather_str else "grey"
+
+            card = ft.Container(
+                content=ft.Row([
+                    ft.Icon(icon_name, size=30, color=icon_color),
+                    ft.Column([
+                        ft.Text(f"日付: {date_display}", size=16, weight="bold", color="#333333"),
+                        ft.Text(f"天気: {weather_str}", size=14, color="#333333"),
+                    ], spacing=2)
+                ], alignment="start"),
+                bgcolor="white",
+                padding=15,
+                border_radius=8,
+                border=ft.Border.all(1, "#E0E0E0")
+            )
+            weather_display.controls.append(card)
         
         page.update()
 
@@ -250,7 +284,6 @@ def main(page: ft.Page):
         areas_column.visible = True
         weather_display.visible = False
         
-        # 選択された地方の都道府県リストを取得
         center_info = area_data["centers"].get(selected_center, {})
         office_codes = center_info.get("children", [])
         
@@ -265,7 +298,6 @@ def main(page: ft.Page):
             btn_label = "設定済" if is_my else "設定"
             btn_bg_color = "#9E9E9E" if is_my else "#1976D2"
             
-            # カード行を作成
             row = ft.Row(
                 controls=[
                     ft.Column([
@@ -326,7 +358,6 @@ def main(page: ft.Page):
             status_text.value = "My地域は未設定です"
         page.update()
 
-    # 初期化処理
     def initialize():
         nonlocal area_data, selected_center
         
@@ -340,8 +371,12 @@ def main(page: ft.Page):
             page.update()
             return
         
-        # NavigationRailの設定
+        # ★ここでエリア情報をDBに保存
+        save_areas_to_db(area_data)
+        
         centers = area_data.get("centers", {})
+        # center_codes をグローバルに近いスコープで使えるようリスト化
+        nonlocal center_codes
         center_codes = list(centers.keys())
         center_names = [centers[code]["name"] for code in center_codes]
         
@@ -353,11 +388,17 @@ def main(page: ft.Page):
             ) for name in center_names
         ]
         
-        selected_center = center_codes[0]
+        if center_codes:
+            selected_center = center_codes[0]
+            
         update_status()
         update_areas_list()
 
-    center_codes = []
+    # ---------------------------
+    # レイアウト構築
+    # ---------------------------
+    center_codes = [] # initializeで中身を入れる
+    
     rail = ft.NavigationRail(
         selected_index=0,
         label_type="all",
@@ -367,7 +408,6 @@ def main(page: ft.Page):
         bgcolor="#EEEEEE",
     )
 
-    # コンテンツエリア
     content_container = ft.Container(
         content=ft.Column(
             controls=[
@@ -386,7 +426,6 @@ def main(page: ft.Page):
         expand=True,
     )
 
-    # 全体レイアウト
     layout = ft.Row(
         controls=[
             rail,
@@ -399,7 +438,7 @@ def main(page: ft.Page):
 
     page.add(layout)
     
-    # データ取得と初期化
+    # アプリ起動
     initialize()
 
 # ブラウザ起動モード
